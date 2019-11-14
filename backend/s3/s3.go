@@ -2036,6 +2036,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	metadata := map[string]*string{
 		metaMtime: aws.String(swift.TimeToFloatString(modTime)),
 	}
+	metadata["creation-time"] = aws.String(strconv.FormatInt(modTime.Unix(), 10))
 
 	// read the md5sum if available for non multpart and if
 	// disable checksum isn't present.
