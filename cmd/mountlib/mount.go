@@ -40,7 +40,7 @@ var (
 
 // Global constants
 const (
-	MaxLeafSize = 4095 // don't pass file names longer than this
+	MaxLeafSize = 1024 // don't pass file names longer than this
 )
 
 func init() {
