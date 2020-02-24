@@ -54,6 +54,7 @@ const (
 	minChunkSize        = 5 * fs.MebiByte
 	defaultChunkSize    = 96 * fs.MebiByte
 	defaultUploadCutoff = 200 * fs.MebiByte
+	largeFileCopyCutoff = 5E9
 )
 
 // Globals
@@ -1200,6 +1201,23 @@ func (f *Fs) CleanUp(ctx context.Context) error {
 	return f.purge(ctx, f.rootBucket, f.rootDirectory, true)
 }
 
+// Copy the object as described in request
+func (f *Fs) copy(ctx context.Context, size int64, request *api.CopyFileRequest) (response *api.FileInfo, err error) {
+	if size >= largeFileCopyCutoff {
+		// FIXME implement multipart copy here - see https://github.com/rclone/rclone/issues/3991
+		return nil, errors.Errorf("Can't copy file of size >= %d", fs.SizeSuffix(largeFileCopyCutoff))
+	}
+	opts := rest.Opts{
+		Method: "POST",
+		Path:   "/b2_copy_file",
+	}
+	err = f.pacer.Call(func() (bool, error) {
+		resp, err := f.srv.CallJSON(ctx, &opts, request, &response)
+		return f.shouldRetry(ctx, resp, err)
+	})
+	return response, err
+}
+
 // Copy src to this remote using server side copy operations.
 //
 // This is stored with the remote path given
@@ -1224,21 +1242,13 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	if err != nil {
 		return nil, err
 	}
-	opts := rest.Opts{
-		Method: "POST",
-		Path:   "/b2_copy_file",
-	}
 	var request = api.CopyFileRequest{
 		SourceID:          srcObj.id,
 		Name:              f.opt.Enc.FromStandardPath(dstPath),
 		MetadataDirective: "COPY",
 		DestBucketID:      destBucketID,
 	}
-	var response api.FileInfo
-	err = f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.CallJSON(ctx, &opts, &request, &response)
-		return f.shouldRetry(ctx, resp, err)
-	})
+	response, err := f.copy(ctx, srcObj.size, &request)
 	if err != nil {
 		return nil, err
 	}
@@ -1246,7 +1256,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 		fs:     f,
 		remote: remote,
 	}
-	err = o.decodeMetaDataFileInfo(&response)
+	err = o.decodeMetaDataFileInfo(response)
 	if err != nil {
 		return nil, err
 	}
@@ -1513,10 +1523,6 @@ func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
 	}
 	_, bucketPath := o.split()
 	info.Info[timeKey] = timeString(modTime)
-	opts := rest.Opts{
-		Method: "POST",
-		Path:   "/b2_copy_file",
-	}
 	var request = api.CopyFileRequest{
 		SourceID:          o.id,
 		Name:              o.fs.opt.Enc.FromStandardPath(bucketPath), // copy to same name
@@ -1524,15 +1530,11 @@ func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
 		ContentType:       info.ContentType,
 		Info:              info.Info,
 	}
-	var response api.FileInfo
-	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err := o.fs.srv.CallJSON(ctx, &opts, &request, &response)
-		return o.fs.shouldRetry(ctx, resp, err)
-	})
+	response, err := o.fs.copy(ctx, o.size, &request)
 	if err != nil {
 		return err
 	}
-	return o.decodeMetaDataFileInfo(&response)
+	return o.decodeMetaDataFileInfo(response)
 }
 
 // Storable returns if this object is storable
