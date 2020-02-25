@@ -69,6 +69,11 @@ func init() {
 			Default:  false,
 			Advanced: true,
 		}, {
+			Name:     "close_timeout",
+			Help:     "Maximum time to wait for a response to close.",
+			Default:  fs.Duration(60 * time.Second),
+			Advanced: true,
+		}, {
 			Name:     config.ConfigEncoding,
 			Help:     config.ConfigEncodingHelp,
 			Advanced: true,
@@ -93,6 +98,7 @@ type Options struct {
 	Concurrency       int                  `config:"concurrency"`
 	SkipVerifyTLSCert bool                 `config:"no_check_certificate"`
 	DisableEPSV       bool                 `config:"disable_epsv"`
+	CloseTimeout      fs.Duration          `config:"close_timeout"`
 	Enc               encoder.MultiEncoder `config:"encoding"`
 }
 
@@ -780,8 +786,8 @@ func (f *ftpReadCloser) Close() error {
 	go func() {
 		errchan <- f.rc.Close()
 	}()
-	// Wait for Close for up to 60 seconds
-	timer := time.NewTimer(60 * time.Second)
+	// Wait for Close for up to 60 seconds by default
+	timer := time.NewTimer(time.Duration(f.f.opt.CloseTimeout))
 	select {
 	case err = <-errchan:
 		timer.Stop()
