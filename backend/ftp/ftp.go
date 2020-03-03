@@ -18,10 +18,17 @@ import (
 	"github.com/rclone/rclone/fs/config/configmap"
 	"github.com/rclone/rclone/fs/config/configstruct"
 	"github.com/rclone/rclone/fs/config/obscure"
+	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/pacer"
 	"github.com/rclone/rclone/lib/readers"
+)
+
+const (
+	minSleep      = 10 * time.Millisecond
+	maxSleep      = 2 * time.Second
+	decayConstant = 2 // bigger for slower decay, exponential
 )
 
 // Register with Fs
@@ -115,6 +122,7 @@ type Fs struct {
 	poolMu   sync.Mutex
 	pool     []*ftp.ServerConn
 	tokens   *pacer.TokenDispenser
+	pacer    *fs.Pacer // pacer for FTP connections
 }
 
 // Object describes an FTP file
@@ -154,8 +162,21 @@ func (f *Fs) Features() *fs.Features {
 	return f.features
 }
 
+// shouldRetry returns a boolean as to whether this err deserve to be
+// retried.  It returns the err as a convenience
+func shouldRetry(err error) (bool, error) {
+	switch errX := err.(type) {
+	case *textproto.Error:
+		switch errX.Code {
+		case ftp.StatusNotAvailable:
+			return true, err
+		}
+	}
+	return fserrors.ShouldRetry(err), err
+}
+
 // Open a new connection to the FTP server.
-func (f *Fs) ftpConnection() (*ftp.ServerConn, error) {
+func (f *Fs) ftpConnection() (c *ftp.ServerConn, err error) {
 	fs.Debugf(f, "Connecting to FTP server")
 	ftpConfig := []ftp.DialOption{ftp.DialWithTimeout(fs.Config.ConnectTimeout)}
 	if f.opt.TLS {
@@ -168,18 +189,22 @@ func (f *Fs) ftpConnection() (*ftp.ServerConn, error) {
 	if f.opt.DisableEPSV {
 		ftpConfig = append(ftpConfig, ftp.DialWithDisabledEPSV(true))
 	}
-	c, err := ftp.Dial(f.dialAddr, ftpConfig...)
+	err = f.pacer.Call(func() (bool, error) {
+		c, err = ftp.Dial(f.dialAddr, ftpConfig...)
+		if err != nil {
+			return shouldRetry(err)
+		}
+		err = c.Login(f.user, f.pass)
+		if err != nil {
+			_ = c.Quit()
+			return shouldRetry(err)
+		}
+		return false, nil
+	})
 	if err != nil {
-		fs.Errorf(f, "Error while Dialing %s: %s", f.dialAddr, err)
-		return nil, errors.Wrap(err, "ftpConnection Dial")
+		err = errors.Wrapf(err, "failed to make FTP connection to %q", f.dialAddr)
 	}
-	err = c.Login(f.user, f.pass)
-	if err != nil {
-		_ = c.Quit()
-		fs.Errorf(f, "Error while Logging in into %s: %s", f.dialAddr, err)
-		return nil, errors.Wrap(err, "ftpConnection Login")
-	}
-	return c, nil
+	return c, err
 }
 
 // Get an FTP connection from the pool, or open a new one
@@ -276,6 +301,7 @@ func NewFs(name, root string, m configmap.Mapper) (ff fs.Fs, err error) {
 		pass:     pass,
 		dialAddr: dialAddr,
 		tokens:   pacer.NewTokenDispenser(opt.Concurrency),
+		pacer:    fs.NewPacer(pacer.NewDefault(pacer.MinSleep(minSleep), pacer.MaxSleep(maxSleep), pacer.DecayConstant(decayConstant))),
 	}
 	f.features = (&fs.Features{
 		CanHaveEmptyDirectories: true,
