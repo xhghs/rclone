@@ -2,7 +2,6 @@ package copy
 
 import (
 	"context"
-
 	"github.com/rclone/rclone/cmd"
 	"github.com/rclone/rclone/fs/config/flags"
 	"github.com/rclone/rclone/fs/operations"
@@ -76,6 +75,9 @@ changed recently very efficiently like this:
 	Run: func(command *cobra.Command, args []string) {
 		cmd.CheckArgs(2, 2, command, args)
 		fsrc, srcFileName, fdst := cmd.NewFsSrcFileDst(args)
+		if(len(fsrc.Root()) > 7 && "isFile:" == fsrc.Root()[0:7]){
+			srcFileName = fsrc.Root()[7:]
+		}
 		cmd.Run(true, true, command, func() error {
 			if srcFileName == "" {
 				return sync.CopyDir(context.Background(), fdst, fsrc, createEmptySrcDirs)
